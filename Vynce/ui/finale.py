@@ -1,27 +1,36 @@
-# -*- coding: utf-8 -*-
-"""E.D.I - Smart Voice Assistant (Groq + Multilanguage)"""
+"""
+E.D.I - Smart Voice Assistant  (Groq + Multilanguage)
+Updated: better info-detection (fixes "tell me about vit pune")
+Added OS commands
+GUI unchanged
+"""
 
+# ---------- FIX: Disable DPI Warning ----------
 import ctypes
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(0)
 except:
     pass
-
+# ----------------------------------------------------
 import requests
 import os, sys, json, threading, subprocess, time, webbrowser, wikipedia
 from langdetect import detect
 import speech_recognition as sr
 import pyttsx3
 from groq import Groq
+
+# PyQt6 - GUI
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QColor, QRadialGradient, QFont
 from PyQt6.QtWidgets import QApplication, QWidget
 
+# -------------------------------
+# IMPORTANT GLOBALS
+# -------------------------------
 ORB_DIAMETER = 180
 
 # Get API key from environment variable (recommended for production)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
 client = None
 try:
     if GROQ_API_KEY:
@@ -29,6 +38,9 @@ try:
 except:
     client = None
 
+# -------------------------------
+#  SPEECH (STT/TTS)
+# -------------------------------
 engine = pyttsx3.init()
 engine.setProperty("rate", 180)
 
@@ -58,30 +70,45 @@ def listen_and_recognize():
     except:
         return "", "en"
 
+
+# -------------------------------
+# OS COMMANDS (NEW)
+# -------------------------------
 def execute_os_command(text):
     t = text.lower()
+
     if "shutdown" in t or "band kar" in t:
         os.system("shutdown /s /t 3")
         speak("Shutting down your system.")
         return True
+
     if "restart" in t or "reboot" in t:
         os.system("shutdown /r /t 3")
         speak("Restarting your system.")
         return True
+
     if "sleep" in t:
         speak("Putting the system to sleep.")
         os.system("rundll32.exe powrprof.dll,SetSuspendState Sleep")
         return True
+
     if "lock" in t or "screen lock" in t:
         speak("Locking your device.")
         os.system("rundll32.exe user32.dll,LockWorkStation")
         return True
+
     if "sign out" in t or "log out" in t:
         speak("Signing out.")
         os.system("shutdown /l")
         return True
+
     return False
 
+
+# -------------------------------
+# INTENT DETECTION FIX
+# -------------------------------
+# Always treat these as info questions
 INFO_KEYWORDS = [
     "tell me about", "kya hai", "kaun hai", "what is", "who is",
     "details", "summary", "information", "info", "explain"
@@ -91,12 +118,20 @@ def is_info_question(text):
     t = text.lower()
     return any(k in t for k in INFO_KEYWORDS)
 
+
 def get_intent(user_text):
     if client is None:
         return {"intent": "unknown", "query": user_text}
+
+    # If info question → do not ask AI for intent
     if is_info_question(user_text):
         return {"intent": "ask_info", "query": user_text}
-    prompt = f"Classify into: open_app, ask_info, unknown. Return JSON only. User: \"{user_text}\""
+
+    prompt = f"""
+Classify the text into: open_app, ask_info, unknown
+Return JSON only.
+User: "{user_text}"
+"""
     try:
         res = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -106,6 +141,10 @@ def get_intent(user_text):
     except:
         return {"intent": "unknown", "query": user_text}
 
+
+# -------------------------------
+# MULTILANGUAGE APP OPEN
+# -------------------------------
 APP_SYNONYMS = {
     "youtube": ["youtube", "youtube kholo", "open youtube", "youtube chalu"],
     "google": ["google", "google kholo", "open google", "google chrome"],
@@ -130,25 +169,37 @@ def match_app(text):
 
 def open_application(app_name):
     app = app_name.lower()
+
+    # youtube / google always open browser
     if app == "youtube":
         webbrowser.open("https://youtube.com")
         return "Opening YouTube."
+
     if app == "google":
         webbrowser.open("https://google.com")
         return "Opening Google."
+
     if app in APP_PATHS and os.path.exists(APP_PATHS[app]):
         subprocess.Popen(APP_PATHS[app])
         return f"Opening {app}."
+
+    # fallback → search
     webbrowser.open(f"https://www.google.com/search?q={requests.utils.quote(app_name)}")
     return f"Searching for {app_name}."
 
+
+# -------------------------------
+#  AI KNOWLEDGE (Groq)
+# -------------------------------
 def ai_info(query, lang="en"):
     if client is None:
         try:
             return wikipedia.summary(query, sentences=2)
         except:
             return f"I couldn't find information on {query}."
+
     prompt = f"Give a short answer in {lang}. User: {query}"
+
     try:
         res = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -156,29 +207,49 @@ def ai_info(query, lang="en"):
         )
         return res.choices[0].message.content
     except:
-        return "Couldn't answer that."
+        return f"Couldn't answer that."
 
+
+# -------------------------------
+# MAIN PROCESSING
+# -------------------------------
 def process_command(text, lang="en"):
+
+    # 1) OS Commands
     if execute_os_command(text):
         return
+
+    # 2) App Opening
     app = match_app(text)
     if app:
         speak(open_application(app))
         return
+
+    # 3) Info Question (fixed)
     if is_info_question(text):
         speak(ai_info(text, lang))
         return
+
+    # 4) Intent detection
     intent = get_intent(text)
+
     if intent["intent"] == "ask_info":
         speak(ai_info(text, lang))
         return
+
     if intent["intent"] == "open_app":
         app2 = match_app(intent["query"])
         if app2:
             speak(open_application(app2))
             return
+
+    # fallback
     speak(ai_info(text, lang))
 
+
+# =================================================================
+# GUI (UNCHANGED)
+# =================================================================
 class OrbGUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -188,9 +259,7 @@ class OrbGUI(QWidget):
         self.resize(480, 500)
         self.phase, self.pulse, self.is_listening = 0.0, 0.0, False
         self.status = "Tap the orb to speak"
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_animation)
-        self.timer.start(30)
+        self.timer = QTimer(); self.timer.timeout.connect(self.update_animation); self.timer.start(30)
 
     def mousePressEvent(self, e):
         pos = e.position()
@@ -206,21 +275,20 @@ class OrbGUI(QWidget):
         self.update()
 
     def paintEvent(self, ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx, cy, R = self.width()//2, 220, ORB_DIAMETER//2
         curR = int(R*(1.0+0.1*self.pulse))
         for a in [140, 100, 60]:
             rad = int(curR*(a/100.0))
-            p.setBrush(QColor(90, 170, 255, a))
+            p.setBrush(QColor(90,170,255,a))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(int(cx-rad), int(cy-rad), int(2*rad), int(2*rad))
         grad = QRadialGradient(cx, cy, curR, cx-curR*0.3, cy-curR*0.3)
-        grad.setColorAt(0, QColor(255, 255, 255))
-        grad.setColorAt(1, QColor(70, 150, 255))
+        grad.setColorAt(0, QColor(255,255,255))
+        grad.setColorAt(1, QColor(70,150,255))
         p.setBrush(grad)
         p.drawEllipse(int(cx-curR), int(cy-curR), int(curR*2), int(curR*2))
-        p.setPen(QColor(230, 240, 255))
+        p.setPen(QColor(230,240,255))
         p.setFont(QFont("Segoe UI", 13))
         p.drawText(0, int(cy+curR+25), self.width(), 40, Qt.AlignmentFlag.AlignHCenter, self.status)
         p.end()
@@ -244,6 +312,8 @@ class OrbGUI(QWidget):
             speak("Error.")
             self.is_listening = False
 
+
+# ---------- MAIN ----------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     gui = OrbGUI()
