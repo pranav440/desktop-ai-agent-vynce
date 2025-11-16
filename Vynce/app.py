@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """E.D.I - Smart Voice Assistant (Groq + Multilanguage)"""
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import ctypes
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(0)
