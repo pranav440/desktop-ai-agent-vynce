@@ -101,6 +101,8 @@ def listen_and_recognize(timeout=5, phrase_time_limit=MAX_PHRASE_TIME):
         try:
             audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
         except sr.WaitTimeoutError:
+            print("[TIMEOUT] No speech detected within timeout period")
+            speak("I didn't hear anything. Please try again.")
             return "", "en"
     # try to recognize (default service: Google Web Speech)
     try:
@@ -109,8 +111,11 @@ def listen_and_recognize(timeout=5, phrase_time_limit=MAX_PHRASE_TIME):
         text = text.strip()
         print("User:", text)
     except sr.UnknownValueError:
+        print("[RECOGNITION ERROR] Could not understand audio - please speak clearly")
+        speak("Sorry, I didn't understand that. Can you repeat please?")
         return "", "en"
-    except sr.RequestError:
+    except sr.RequestError as e:
+        print(f"[REQUEST ERROR] {e}")
         speak("Speech recognition service is not reachable right now.")
         return "", "en"
     # detect language code using langdetect if available
@@ -651,24 +656,37 @@ class OrbGUI(QWidget):
 
     def _voice_flow(self):
         try:
-            self.is_listening = True
-            self.status = "Listening..."
-            self.update()
-            speak("Yes?")
-            txt, lang = listen_and_recognize()
-            if not txt:
-                speak(TEMPLATES.get(lang, TEMPLATES["en"]).get("listening_error", "Sorry, I didn't catch that."))
-                self.status = "Tap the orb to speak"
-                self.is_listening = False
-                return
-            self.status = "Processing..."
-            self.update()
-            # process with language
-            process_command(txt, lang=lang)
+            max_retries = 2  # Try up to 2 times if speech not recognized
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                self.is_listening = True
+                self.status = "Listening..."
+                self.update()
+                speak("Yes?")
+                
+                txt, lang = listen_and_recognize()
+                
+                if txt:  # Successfully recognized text
+                    self.status = "Processing..."
+                    self.update()
+                    process_command(txt, lang=lang)
+                    break  # Exit loop after successful command
+                else:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        speak("Let me try again...")
+                    else:
+                        speak("Unable to recognize your speech. Please try again.")
+                        break
+            
             self.status = "Tap the orb to speak"
             self.is_listening = False
+            
         except Exception as e:
-            print("Voice flow error:", e)
+            print(f"Voice flow error: {e}")
+            import traceback
+            traceback.print_exc()
             speak("Something went wrong.")
             self.status = "Tap the orb to speak"
             self.is_listening = False
