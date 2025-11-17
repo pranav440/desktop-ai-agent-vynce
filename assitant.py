@@ -650,32 +650,26 @@ class OrbGUI(QWidget):
         p.end()
 
     def _voice_flow(self):
-        """Continuous listening loop - automatically listens after each command"""
         try:
-            while True:  # Continuous loop
-                self.is_listening = True
-                self.status = "Listening..."
-                self.update()
-                speak("Yes?")
-                
-                # Listen for command
-                txt, lang = listen_and_recognize()
-                if not txt:
-                    speak(TEMPLATES.get(lang, TEMPLATES["en"]).get("listening_error", "Sorry, I didn't catch that. Please repeat."))
-                    continue  # Keep listening
-                
-                self.status = "Processing..."
-                self.update()
-                
-                # Process command
-                process_command(txt, lang=lang)
-                
-                # Stay listening
-                self.status = "Ready to listen..."
-                
+            self.is_listening = True
+            self.status = "Listening..."
+            self.update()
+            speak("Yes?")
+            txt, lang = listen_and_recognize()
+            if not txt:
+                speak(TEMPLATES.get(lang, TEMPLATES["en"]).get("listening_error", "Sorry, I didn't catch that."))
+                self.status = "Tap the orb to speak"
+                self.is_listening = False
+                return
+            self.status = "Processing..."
+            self.update()
+            # process with language
+            process_command(txt, lang=lang)
+            self.status = "Tap the orb to speak"
+            self.is_listening = False
         except Exception as e:
             print("Voice flow error:", e)
-            speak("Something went wrong. Restarting...")
+            speak("Something went wrong.")
             self.status = "Tap the orb to speak"
             self.is_listening = False
 
