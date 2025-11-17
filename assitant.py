@@ -310,6 +310,9 @@ INTENTS = {
     "open_spotify": [
         "open spotify","spotify kholo","spotify open","spotify chalu","spotify","music","play music"
     ],
+    "send_whatsapp": [
+        "send message","send whatsapp","message to","send to","whatsapp message","send whatsapp message"
+    ],
     "time": ["time","what time","samay","kitne baje","وقت"],
     "date": ["date","today","aaj ki tareekh","aaj"],
     "joke": ["joke","chutkula","mazak"],
@@ -333,6 +336,53 @@ def quick_search(query):
         return summary
     except:
         return None
+
+
+# ---------- WhatsApp Helper Functions ----------
+def load_contacts():
+    """Load contacts from contacts.json file"""
+    try:
+        contacts_file = os.path.join(os.path.dirname(__file__), "contacts.json")
+        if os.path.exists(contacts_file):
+            with open(contacts_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+
+def send_whatsapp_message(contact_name, message):
+    """Send WhatsApp message to a contact"""
+    try:
+        contacts = load_contacts()
+        contact_name_lower = contact_name.lower().strip()
+        
+        # Find contact (case-insensitive)
+        phone_number = None
+        for name, number in contacts.items():
+            if name.lower() == contact_name_lower:
+                phone_number = number
+                break
+        
+        if not phone_number:
+            return f"Contact {contact_name} not found. Please add it to contacts.json"
+        
+        # Format the URL for WhatsApp Web
+        # WhatsApp Web URL format: https://web.whatsapp.com/send?phone=PHONENUMBER&text=MESSAGE
+        phone_number = phone_number.replace("+", "").replace(" ", "").replace("-", "")
+        
+        # Ensure it starts with country code (default: +91 for India)
+        if not phone_number.startswith("91") and not phone_number.startswith("+"):
+            phone_number = "91" + phone_number
+        
+        message_encoded = requests.utils.quote(message)
+        whatsapp_url = f"https://web.whatsapp.com/send?phone={phone_number}&text={message_encoded}"
+        
+        webbrowser.open(whatsapp_url)
+        return f"Opening WhatsApp to send message to {contact_name}"
+    
+    except Exception as e:
+        return f"Error sending WhatsApp message: {str(e)}"
 
 
 # ---------- Core Logic ----------
@@ -473,6 +523,28 @@ def process_command(txt, lang="en"):
             subprocess.Popen(spotify_path)
         else:
             webbrowser.open("https://open.spotify.com")
+        return
+
+    if any(k in low for k in INTENTS["send_whatsapp"]):
+        speak(tpl(lang, "processing", action="WhatsApp message"))
+        speak("Please say the contact name followed by the message.")
+        
+        # Listen for contact name
+        contact_name = listen_and_recognize()
+        if not contact_name:
+            speak("Sorry, I couldn't hear the contact name.")
+            return
+        
+        speak(f"Sending message to {contact_name}. Please say your message.")
+        
+        # Listen for message
+        message = listen_and_recognize()
+        if not message:
+            speak("Sorry, I couldn't hear the message.")
+            return
+        
+        result = send_whatsapp_message(contact_name, message)
+        speak(result)
         return
 
     # TIME / DATE
