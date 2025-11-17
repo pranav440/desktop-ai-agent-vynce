@@ -6,7 +6,7 @@ Keeps the original GUI & behavior, adds language detection and
 multilingual phrase handling. Uses pyttsx3 for TTS.
 """
 
-import os, sys, re, threading, time, json, webbrowser, requests, pyjokes, wikipedia, pyautogui
+import os, sys, re, threading, time, json, webbrowser, requests, pyjokes, wikipedia, pyautogui, subprocess
 from datetime import datetime
 
 # STT / TTS
@@ -304,6 +304,12 @@ INTENTS = {
     "open_calculator": [
         "open calculator","calculator kholo","open calc","open calculator"
     ],
+    "open_whatsapp": [
+        "open whatsapp","whatsapp kholo","whatsapp open","whatsapp chalu","whatsapp","message"
+    ],
+    "open_spotify": [
+        "open spotify","spotify kholo","spotify open","spotify chalu","spotify","music","play music"
+    ],
     "time": ["time","what time","samay","kitne baje","وقت"],
     "date": ["date","today","aaj ki tareekh","aaj"],
     "joke": ["joke","chutkula","mazak"],
@@ -447,6 +453,26 @@ def process_command(txt, lang="en"):
     if any(k in low for k in INTENTS["open_calculator"]):
         speak(tpl(lang, "opening", what="Calculator"))
         os.system("calc")
+        return
+
+    if any(k in low for k in INTENTS["open_whatsapp"]):
+        speak(tpl(lang, "opening", what="WhatsApp"))
+        username = os.getenv('USERNAME', 'ASUS')
+        whatsapp_path = fr"C:\Users\{username}\AppData\Local\WhatsApp\WhatsApp.exe"
+        if os.path.exists(whatsapp_path):
+            subprocess.Popen(whatsapp_path)
+        else:
+            webbrowser.open("https://web.whatsapp.com")
+        return
+
+    if any(k in low for k in INTENTS["open_spotify"]):
+        speak(tpl(lang, "opening", what="Spotify"))
+        username = os.getenv('USERNAME', 'ASUS')
+        spotify_path = fr"C:\Users\{username}\AppData\Roaming\Spotify\spotify.exe"
+        if os.path.exists(spotify_path):
+            subprocess.Popen(spotify_path)
+        else:
+            webbrowser.open("https://open.spotify.com")
         return
 
     # TIME / DATE
