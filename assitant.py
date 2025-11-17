@@ -6,7 +6,7 @@ Keeps the original GUI & behavior, adds language detection and
 multilingual phrase handling. Uses pyttsx3 for TTS.
 """
 
-import os, sys, re, threading, time, json, webbrowser, requests, pyjokes, wikipedia, pyautogui, subprocess
+import os, sys, re, threading, time, json, webbrowser, requests, pyjokes, wikipedia, pyautogui
 from datetime import datetime
 
 # STT / TTS
@@ -101,8 +101,6 @@ def listen_and_recognize(timeout=5, phrase_time_limit=MAX_PHRASE_TIME):
         try:
             audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
         except sr.WaitTimeoutError:
-            print("[TIMEOUT] No speech detected within timeout period")
-            speak("I didn't hear anything. Please try again.")
             return "", "en"
     # try to recognize (default service: Google Web Speech)
     try:
@@ -111,11 +109,8 @@ def listen_and_recognize(timeout=5, phrase_time_limit=MAX_PHRASE_TIME):
         text = text.strip()
         print("User:", text)
     except sr.UnknownValueError:
-        print("[RECOGNITION ERROR] Could not understand audio - please speak clearly")
-        speak("Sorry, I didn't understand that. Can you repeat please?")
         return "", "en"
-    except sr.RequestError as e:
-        print(f"[REQUEST ERROR] {e}")
+    except sr.RequestError:
         speak("Speech recognition service is not reachable right now.")
         return "", "en"
     # detect language code using langdetect if available
@@ -309,15 +304,6 @@ INTENTS = {
     "open_calculator": [
         "open calculator","calculator kholo","open calc","open calculator"
     ],
-    "open_whatsapp": [
-        "open whatsapp","whatsapp kholo","whatsapp open","whatsapp chalu","whatsapp","message"
-    ],
-    "open_spotify": [
-        "open spotify","spotify kholo","spotify open","spotify chalu","spotify","music","play music"
-    ],
-    "send_whatsapp": [
-        "send message","send whatsapp","message to","send to","whatsapp message","send whatsapp message"
-    ],
     "time": ["time","what time","samay","kitne baje","وقت"],
     "date": ["date","today","aaj ki tareekh","aaj"],
     "joke": ["joke","chutkula","mazak"],
@@ -341,53 +327,6 @@ def quick_search(query):
         return summary
     except:
         return None
-
-
-# ---------- WhatsApp Helper Functions ----------
-def load_contacts():
-    """Load contacts from contacts.json file"""
-    try:
-        contacts_file = os.path.join(os.path.dirname(__file__), "contacts.json")
-        if os.path.exists(contacts_file):
-            with open(contacts_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-
-def send_whatsapp_message(contact_name, message):
-    """Send WhatsApp message to a contact"""
-    try:
-        contacts = load_contacts()
-        contact_name_lower = contact_name.lower().strip()
-        
-        # Find contact (case-insensitive)
-        phone_number = None
-        for name, number in contacts.items():
-            if name.lower() == contact_name_lower:
-                phone_number = number
-                break
-        
-        if not phone_number:
-            return f"Contact {contact_name} not found. Please add it to contacts.json"
-        
-        # Format the URL for WhatsApp Web
-        # WhatsApp Web URL format: https://web.whatsapp.com/send?phone=PHONENUMBER&text=MESSAGE
-        phone_number = phone_number.replace("+", "").replace(" ", "").replace("-", "")
-        
-        # Ensure it starts with country code (default: +91 for India)
-        if not phone_number.startswith("91") and not phone_number.startswith("+"):
-            phone_number = "91" + phone_number
-        
-        message_encoded = requests.utils.quote(message)
-        whatsapp_url = f"https://web.whatsapp.com/send?phone={phone_number}&text={message_encoded}"
-        
-        webbrowser.open(whatsapp_url)
-        return f"Opening WhatsApp to send message to {contact_name}"
-    
-    except Exception as e:
-        return f"Error sending WhatsApp message: {str(e)}"
 
 
 # ---------- Core Logic ----------
@@ -510,48 +449,6 @@ def process_command(txt, lang="en"):
         os.system("calc")
         return
 
-    if any(k in low for k in INTENTS["open_whatsapp"]):
-        speak(tpl(lang, "opening", what="WhatsApp"))
-        username = os.getenv('USERNAME', 'ASUS')
-        whatsapp_path = fr"C:\Users\{username}\AppData\Local\WhatsApp\WhatsApp.exe"
-        if os.path.exists(whatsapp_path):
-            subprocess.Popen(whatsapp_path)
-        else:
-            webbrowser.open("https://web.whatsapp.com")
-        return
-
-    if any(k in low for k in INTENTS["open_spotify"]):
-        speak(tpl(lang, "opening", what="Spotify"))
-        username = os.getenv('USERNAME', 'ASUS')
-        spotify_path = fr"C:\Users\{username}\AppData\Roaming\Spotify\spotify.exe"
-        if os.path.exists(spotify_path):
-            subprocess.Popen(spotify_path)
-        else:
-            webbrowser.open("https://open.spotify.com")
-        return
-
-    if any(k in low for k in INTENTS["send_whatsapp"]):
-        speak(tpl(lang, "processing", action="WhatsApp message"))
-        speak("Please say the contact name followed by the message.")
-        
-        # Listen for contact name
-        contact_name = listen_and_recognize()
-        if not contact_name:
-            speak("Sorry, I couldn't hear the contact name.")
-            return
-        
-        speak(f"Sending message to {contact_name}. Please say your message.")
-        
-        # Listen for message
-        message = listen_and_recognize()
-        if not message:
-            speak("Sorry, I couldn't hear the message.")
-            return
-        
-        result = send_whatsapp_message(contact_name, message)
-        speak(result)
-        return
-
     # TIME / DATE
     if any(k in low for k in INTENTS["time"]):
         speak(tpl(lang, "time", time=datetime.now().strftime("%I:%M %p")))
@@ -656,37 +553,24 @@ class OrbGUI(QWidget):
 
     def _voice_flow(self):
         try:
-            max_retries = 2  # Try up to 2 times if speech not recognized
-            retry_count = 0
-            
-            while retry_count < max_retries:
-                self.is_listening = True
-                self.status = "Listening..."
-                self.update()
-                speak("Yes?")
-                
-                txt, lang = listen_and_recognize()
-                
-                if txt:  # Successfully recognized text
-                    self.status = "Processing..."
-                    self.update()
-                    process_command(txt, lang=lang)
-                    break  # Exit loop after successful command
-                else:
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        speak("Let me try again...")
-                    else:
-                        speak("Unable to recognize your speech. Please try again.")
-                        break
-            
+            self.is_listening = True
+            self.status = "Listening..."
+            self.update()
+            speak("Yes?")
+            txt, lang = listen_and_recognize()
+            if not txt:
+                speak(TEMPLATES.get(lang, TEMPLATES["en"])["listening_error"] if lang in TEMPLATES else TEMPLATES["en"]["listening_error"])
+                self.status = "Tap again to speak"
+                self.is_listening = False
+                return
+            self.status = "Processing..."
+            self.update()
+            # process with language
+            process_command(txt, lang=lang)
             self.status = "Tap the orb to speak"
             self.is_listening = False
-            
         except Exception as e:
-            print(f"Voice flow error: {e}")
-            import traceback
-            traceback.print_exc()
+            print("Voice flow error:", e)
             speak("Something went wrong.")
             self.status = "Tap the orb to speak"
             self.is_listening = False
