@@ -11,6 +11,11 @@ import time
 import webbrowser
 import subprocess
 import requests
+import urllib.parse
+import imaplib
+import email
+from email.header import decode_header
+from email.utils import parseaddr
 from datetime import datetime
 from pathlib import Path
 
@@ -65,12 +70,27 @@ class Config:
     BASE_DIR = Path.home() / ".edi_assistant"
     MEMORY_FILE = BASE_DIR / "memory.json"
     LOG_FILE = BASE_DIR / "assistant.log"
+    EMAIL_SETTINGS_FILE = BASE_DIR / "email_settings.json"
+    MESSAGES_FILE = BASE_DIR / "messages.json"
     
     # Speech settings
     SPEECH_RATE = 180
     SPEECH_VOLUME = 1.0
     LISTEN_TIMEOUT = 6
     PHRASE_TIME_LIMIT = 12
+    CONTINUOUS_SESSION_ENABLED = True
+    CONTINUOUS_SESSION_STOP_WORDS = [
+        "stop listening",
+        "stop session",
+        "that's all",
+        "nothing else",
+        "cancel",
+        "exit",
+        "bye",
+        "goodbye",
+        "thank you",
+        "thanks"
+    ]
     
     # GUI settings
     ORB_DIAMETER = 180
@@ -169,20 +189,17 @@ class TTSEngine:
             Logger.error(f"Voice setup error: {e}")
     
     def speak(self, text):
-        """Speak text in background thread"""
-        def _speak():
-            with self.lock:
-                self.is_speaking = True
-                try:
-                    Logger.info(f"Speaking: {text}")
-                    self.engine.say(text)
-                    self.engine.runAndWait()
-                except Exception as e:
-                    Logger.error(f"TTS error: {e}")
-                finally:
-                    self.is_speaking = False
-        
-        threading.Thread(target=_speak, daemon=True).start()
+        """Speak text synchronously (main thread)"""
+        with self.lock:
+            self.is_speaking = True
+            try:
+                Logger.info(f"Speaking: {text}")
+                self.engine.say(text)
+                self.engine.runAndWait()
+            except Exception as e:
+                Logger.error(f"TTS error: {e}")
+            finally:
+                self.is_speaking = False
     
     def stop(self):
         """Stop speaking"""
@@ -281,7 +298,7 @@ class AIAssistant:
             return self._fallback_intent(text)
         
         prompt = f"""Analyze this command and return JSON with intent and extracted info.
-Possible intents: open_app, system_command, ask_info, set_name, weather, time, date, screenshot, unknown
+Possible intents: open_app, system_command, ask_info, set_name, weather, time, date, screenshot, send_email, file_search, read_messages, music_control, email_check, unknown
 
 User command: "{text}"
 
@@ -315,6 +332,9 @@ Return format:
         if any(k in text_lower for k in ['my name is', 'call me', 'mera naam']):
             return {"intent": "set_name", "query": text}
         
+        if any(k in text_lower for k in ['send email', 'write email', 'email bhejo']):
+            return {"intent": "send_email", "query": text}
+        
         if any(k in text_lower for k in ['what', 'who', 'where', 'when', 'how', 'why', 'tell me']):
             return {"intent": "ask_info", "query": text}
         
@@ -328,6 +348,18 @@ Return format:
         
         if 'screenshot' in text_lower:
             return {"intent": "screenshot", "query": text}
+        
+        if any(k in text_lower for k in ['search files', 'find file', 'locate file', 'file search']):
+            return {"intent": "file_search", "query": text}
+        
+        if any(k in text_lower for k in ['read my messages', 'read messages', 'message reader', 'check messages']):
+            return {"intent": "read_messages", "query": text}
+        
+        if any(k in text_lower for k in ['turn on music', 'play music', 'pause music', 'resume music', 'next song', 'previous song']):
+            return {"intent": "music_control", "query": text}
+        
+        if any(k in text_lower for k in ['run email check', 'check my email', 'email status', 'check emails']):
+            return {"intent": "email_check", "query": text}
         
         return {"intent": "ask_info", "query": text}
     
@@ -354,6 +386,61 @@ Question: {query}"""
         except Exception as e:
             Logger.error(f"AI response error: {e}")
             return self._fallback_info(query)
+    
+    def compose_email_body(self, subject):
+        """Generate a short, properly formatted email body from the subject"""
+        default_body = "\n".join([
+            "Hello,",
+            "",
+            f"I'm reaching out regarding \"{subject}\" and wanted to share some context for you to review. "
+            f"This note covers the background, current status, and the next steps I'm proposing. "
+            "Please take a moment to read through the details below so we can stay aligned.",
+            "",
+            "First, here is the latest summary of events and relevant information. "
+            "I've outlined the key motivations for the change, the progress we've made, "
+            "the roadblocks that surfaced, the timelines we are targeting, "
+            "and any dependencies we should watch. "
+            "Each point reflects what we gathered in the most recent discussions.",
+            "",
+            "Second, I'd love your perspective on how we should approach the next phase. "
+            "I'm proposing that we finalize the requirements, assign owners for the remaining deliverables, "
+            "set check-in milestones, identify the support you might need, "
+            "track any risks that emerge, and capture feedback after each milestone. "
+            "Your approval on this plan would help us move forward smoothly.",
+            "",
+            "Thanks in advance for your time and guidance.",
+            f"{self.memory.get('user_name', 'Your Name')}"
+        ])
+        
+        if not self.groq_client:
+            return default_body
+        
+        prompt = f"""You are an AI email writer. Draft a formal Gmail-ready email about "{subject}" with this exact format:
+1. Proper greeting line (e.g., Hello Team,).
+2. Paragraph 1: at least 6 sentences (each on its own line) explaining the background/context in a professional tone.
+3. Blank line.
+4. Paragraph 2: at least 6 sentences (each on its own line) covering next steps, requests, or actions needed.
+5. Blank line.
+6. Closing line with a professional sign-off (e.g., Thanks, Best regards) followed by a name (no placeholders).
+
+Additional rules:
+- Each sentence must be on its own line (no bullet points).
+- Total length should be roughly 180-240 words.
+- Keep the language clear, polite, and actionable.
+- Do not include quoted subject text or placeholders like [Name]."""
+        
+        try:
+            response = self.groq_client.chat.completions.create(
+                model=Config.GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=220
+            )
+            body = response.choices[0].message.content.strip()
+            return body or default_body
+        except Exception as e:
+            Logger.error(f"AI email compose error: {e}")
+            return default_body
     
     def _fallback_info(self, query):
         """Fallback to Wikipedia or web search"""
@@ -415,6 +502,11 @@ class CommandHandler:
         if any(k in text_lower for k in ['google', 'google kholo']):
             self.tts.speak("Opening Google")
             webbrowser.open("https://www.google.com")
+            return True
+        
+        if any(k in text_lower for k in ['gmail', 'email']):
+            self.tts.speak("Opening Gmail in your browser.")
+            webbrowser.open("https://mail.google.com/mail/u/0/#inbox")
             return True
         
         apps = {
@@ -505,6 +597,70 @@ class CommandHandler:
             Logger.error(f"Screenshot error: {e}")
             self.tts.speak("Failed to take screenshot.")
             return False
+    
+    def handle_music_control(self, text):
+        """Control music playback or launch music service"""
+        text_lower = text.lower()
+        
+        if any(k in text_lower for k in ['turn on music', 'play music', 'start music', 'music on']):
+            self.tts.speak("Turning on music in your browser.")
+            webbrowser.open("https://music.youtube.com/")
+            return True
+        
+        if any(k in text_lower for k in ['pause music', 'stop music', 'music pause']):
+            if self._press_media_key('PLAY_PAUSE'):
+                self.tts.speak("Paused music.")
+            else:
+                self.tts.speak("I tried to pause the music, but I couldn't control playback on this device.")
+            return True
+        
+        if any(k in text_lower for k in ['resume music', 'continue music']):
+            if self._press_media_key('PLAY_PAUSE'):
+                self.tts.speak("Resuming music.")
+            else:
+                self.tts.speak("I tried to resume the music, but I couldn't control playback on this device.")
+            return True
+        
+        if any(k in text_lower for k in ['next song', 'next track']):
+            if self._press_media_key('NEXT'):
+                self.tts.speak("Skipping to the next track.")
+            else:
+                self.tts.speak("I couldn't skip the track on this device.")
+            return True
+        
+        if any(k in text_lower for k in ['previous song', 'previous track', 'back song']):
+            if self._press_media_key('PREV'):
+                self.tts.speak("Going back to the previous track.")
+            else:
+                self.tts.speak("I couldn't go to the previous track on this device.")
+            return True
+        
+        self.tts.speak("Tell me to play music, pause, resume, next or previous track.")
+        return False
+    
+    def _press_media_key(self, key):
+        """Simulate media key presses on Windows"""
+        if sys.platform != "win32":
+            return False
+        
+        key_map = {
+            'PLAY_PAUSE': 0xB3,
+            'NEXT': 0xB0,
+            'PREV': 0xB1,
+        }
+        vk_code = key_map.get(key)
+        if not vk_code:
+            return False
+        
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.keybd_event(vk_code, 0, 0, 0)
+            user32.keybd_event(vk_code, 0, 2, 0)
+            return True
+        except Exception as e:
+            Logger.error(f"Media key error: {e}")
+            return False
 
 
 # ============================================================================
@@ -518,7 +674,269 @@ class AssistantController:
         self.stt = STTEngine()
         self.ai = AIAssistant()
         self.handler = CommandHandler(self.ai, self.tts)
+        self._stop_keywords = [kw.lower() for kw in Config.CONTINUOUS_SESSION_STOP_WORDS]
         Logger.info("Assistant initialized")
+    
+    def _prompt_for_input(self, prompt_text, max_retries=2):
+        """Speak a prompt and capture voice input with retry logic"""
+        for attempt in range(max_retries + 1):
+            self.tts.speak(prompt_text)
+            time.sleep(0.8)  # Give more time for TTS to finish
+            Logger.info(f"Listening for input (attempt {attempt + 1})...")
+            text, _ = self.stt.listen()
+            text = text.strip()
+            if text:
+                Logger.info(f"Captured input: {text}")
+                return text
+            else:
+                if attempt < max_retries:
+                    self.tts.speak("I didn't catch that. Please repeat.")
+                    time.sleep(0.5)
+        return ""
+    
+    def _handle_send_email(self):
+        """Voice-guided Gmail compose that auto-writes body from AI"""
+        Logger.info("Starting AI email composition flow")
+        self.tts.speak("Sure. Tell me the subject for your email.")
+        time.sleep(0.4)
+        
+        # Only capture subject; user will enter recipient later in Gmail
+        subject = self._prompt_for_input("What should be the subject of the email?")
+        if not subject:
+            self.tts.speak("I couldn't get the subject. Email composition cancelled.")
+            Logger.error("Failed to get email subject")
+            return
+        
+        Logger.info(f"Email subject: {subject}")
+        self.tts.speak(f"Subject is {subject}.")
+        self.tts.speak("Great. Let me draft the email for you.")
+        body = self.ai.compose_email_body(subject)
+        Logger.info("Generated AI email body.")
+        
+        # Build Gmail compose URL (recipient left blank for user to fill)
+        params = {
+            "view": "cm",
+            "fs": "1",
+            "su": subject,
+            "body": body
+        }
+        query = urllib.parse.urlencode(params, doseq=True, quote_via=urllib.parse.quote)
+        compose_url = f"https://mail.google.com/mail/?{query}"
+        
+        # Open in default browser
+        try:
+            webbrowser.open(compose_url)
+            Logger.info(f"Opened Gmail compose URL: {compose_url}")
+            self.tts.speak("All set. I've opened Gmail with your subject and a drafted email. Just enter the recipient and hit send when you're ready.")
+        except Exception as e:
+            Logger.error(f"Failed to open Gmail: {e}")
+            self.tts.speak("I drafted your email but couldn't open Gmail automatically. Please try again.")
+    
+    def _handle_file_search(self, text):
+        """Search common directories for files matching a keyword"""
+        import re
+        term = ""
+        if text:
+            match = re.search(r'(?:for|named)\s+([A-Za-z0-9_. -]+)', text.lower())
+            if match:
+                term = match.group(1).strip()
+        if not term:
+            term = self._prompt_for_input("What file name should I search for? You can say part of the name.")
+        if not term:
+            self.tts.speak("I couldn't get a file name. Cancelling search.")
+            return
+        
+        self.tts.speak(f"Searching for files containing {term}.")
+        matches = self._search_directories(term.lower())
+        if not matches:
+            self.tts.speak(f"I couldn't find any files matching {term} on your Desktop, Documents, or Downloads.")
+            return
+        
+        max_report = min(len(matches), 3)
+        self.tts.speak(f"I found {len(matches)} matching files. Here are the first {max_report}.")
+        for idx, path in enumerate(matches[:max_report], start=1):
+            self.tts.speak(f"{idx}. {path.name} in {path.parent.name}.")
+        if len(matches) > max_report:
+            self.tts.speak("Ask me to search again if you'd like me to open one of them.")
+    
+    def _search_directories(self, term, max_results=5):
+        """Search desktop, documents, and downloads for matches"""
+        search_dirs = [
+            Path.home() / "Desktop",
+            Path.home() / "Documents",
+            Path.home() / "Downloads",
+        ]
+        matches = []
+        for base in search_dirs:
+            if not base.exists():
+                continue
+            try:
+                for root, _, files in os.walk(base):
+                    for filename in files:
+                        if term in filename.lower():
+                            matches.append(Path(root) / filename)
+                            if len(matches) >= max_results:
+                                return matches
+                    if len(matches) >= max_results:
+                        break
+            except Exception as e:
+                Logger.error(f"File search error in {base}: {e}")
+        return matches
+    
+    def _handle_read_messages(self):
+        """Read stored messages aloud"""
+        messages = self._load_messages()
+        if not messages:
+            self.tts.speak(f"I don't have any saved messages yet. Add them to {Config.MESSAGES_FILE} and ask me again.")
+            return
+        
+        count = min(len(messages), 3)
+        self.tts.speak(f"Reading the latest {count} messages.")
+        for message in messages[:count]:
+            sender = message.get("from", "Unknown")
+            timestamp = message.get("time", "")
+            body = message.get("text", "")
+            if timestamp:
+                self.tts.speak(f"From {sender} at {timestamp}. {body}")
+            else:
+                self.tts.speak(f"From {sender}. {body}")
+    
+    def _load_messages(self):
+        """Load messages from disk"""
+        if Config.MESSAGES_FILE.exists():
+            try:
+                with open(Config.MESSAGES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return data
+            except Exception as e:
+                Logger.error(f"Failed to load messages: {e}")
+        return []
+    
+    def _handle_email_check(self):
+        """Check for unread emails via IMAP or open Gmail"""
+        settings = self._load_email_settings()
+        if not settings:
+            self.tts.speak("Email check isn't configured yet. I've opened Gmail with unread emails so you can review them.")
+            webbrowser.open("https://mail.google.com/mail/u/0/#search/is%3Aunread")
+            return
+        
+        try:
+            host = settings.get("imap_host")
+            email_addr = settings.get("email")
+            password = settings.get("password")
+            if not all([host, email_addr, password]):
+                raise ValueError("Missing email settings.")
+            
+            port = settings.get("imap_port", 993)
+            folder = settings.get("folder", "INBOX")
+            
+            imap = imaplib.IMAP4_SSL(host, port)
+            imap.login(email_addr, password)
+            imap.select(folder)
+            
+            status, data = imap.search(None, "UNSEEN")
+            if status != "OK":
+                raise ValueError("Unable to search mailbox.")
+            
+            ids = data[0].split()
+            unread_count = len(ids)
+            if unread_count == 0:
+                self.tts.speak("You have no unread emails.")
+            else:
+                self.tts.speak(f"You have {unread_count} unread emails. Here are the latest {min(3, unread_count)}.")
+                for msg_id in ids[-3:]:
+                    status, msg_data = imap.fetch(msg_id, "(BODY.PEEK[HEADER])")
+                    if status != "OK":
+                        continue
+                    raw_email = msg_data[0][1]
+                    msg = email.message_from_bytes(raw_email)
+                    subject = self._decode_header_value(msg.get("Subject", "No subject"))
+                    sender_name = parseaddr(msg.get("From", "Unknown"))[0] or "Unknown sender"
+                    self.tts.speak(f"From {sender_name}. Subject: {subject}.")
+            imap.close()
+            imap.logout()
+        except Exception as e:
+            Logger.error(f"Email check failed: {e}")
+            self.tts.speak("I couldn't check your email automatically, so I opened Gmail for you.")
+            webbrowser.open("https://mail.google.com/mail/u/0/#search/is%3Aunread")
+    
+    def _load_email_settings(self):
+        """Load email configuration for IMAP access"""
+        if Config.EMAIL_SETTINGS_FILE.exists():
+            try:
+                with open(Config.EMAIL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception as e:
+                Logger.error(f"Failed to load email settings: {e}")
+        return None
+    
+    def _decode_header_value(self, value):
+        """Decode MIME-encoded email headers"""
+        if not value:
+            return ""
+        parts = decode_header(value)
+        decoded_segments = []
+        for segment, charset in parts:
+            if isinstance(segment, bytes):
+                try:
+                    decoded_segments.append(segment.decode(charset or "utf-8", errors="ignore"))
+                except Exception:
+                    decoded_segments.append(segment.decode("utf-8", errors="ignore"))
+            else:
+                decoded_segments.append(segment)
+        return " ".join(decoded_segments).strip()
+    
+    def start_voice_session(self, initial_text, initial_lang):
+        """Process first command and optionally stay in continuous voice mode"""
+        if not Config.CONTINUOUS_SESSION_ENABLED:
+            self.process_command(initial_text, initial_lang)
+            return
+        self._run_continuous_session(initial_text, initial_lang)
+    
+    def _run_continuous_session(self, initial_text, initial_lang):
+        """Keep listening for follow-up commands until user says stop"""
+        text = initial_text
+        lang = initial_lang
+        first_turn = True
+        
+        while True:
+            if not text:
+                break
+            self.process_command(text, lang)
+            if not Config.CONTINUOUS_SESSION_ENABLED:
+                break
+            
+            if first_turn:
+                prompt = "Voice session is active. Speak your next command or say stop to finish."
+                first_turn = False
+            else:
+                prompt = "I'm still listening. Say stop if you're done."
+            self.tts.speak(prompt)
+            time.sleep(0.4)
+            
+            text, lang = self.stt.listen()
+            text = text.strip()
+            if not text:
+                self.tts.speak("Okay, ending voice session. Tap the orb again when you need me.")
+                break
+            if self._is_stop_command(text):
+                self.tts.speak("All set. Just tap the orb when you need me again.")
+                break
+    
+    def _is_stop_command(self, text):
+        """Check if user requested to end the continuous session"""
+        lowered = (text or "").lower().strip()
+        if not lowered:
+            return False
+        if lowered in {"stop", "exit", "quit"}:
+            return True
+        for phrase in self._stop_keywords:
+            if phrase in lowered:
+                return True
+        return False
     
     def process_command(self, text, lang="en"):
         """Process user command"""
@@ -552,6 +970,21 @@ class AssistantController:
         
         elif intent == "screenshot":
             self.handler.handle_screenshot()
+        
+        elif intent == "send_email":
+            self._handle_send_email()
+        
+        elif intent == "file_search":
+            self._handle_file_search(text)
+        
+        elif intent == "read_messages":
+            self._handle_read_messages()
+        
+        elif intent == "music_control":
+            self.handler.handle_music_control(text)
+        
+        elif intent == "email_check":
+            self._handle_email_check()
         
         elif intent == "ask_info":
             answer = self.ai.get_ai_response(text, lang)
@@ -705,7 +1138,7 @@ class OrbGUI(QWidget):
                 return
             
             self.signals.status_changed.emit("Processing...")
-            self.controller.process_command(text, lang)
+            self.controller.start_voice_session(text, lang)
             
         except Exception as e:
             Logger.error(f"Voice interaction error: {e}")
@@ -730,7 +1163,7 @@ def main():
     gui = OrbGUI(controller)
     gui.show()
     
-    controller.tts.speak("Hello, I'm E.D.I. Tap the orb to speak.")
+    controller.tts.speak("Hello, I'm E.D.I. Tap the orb once to start and keep talking until you say stop.")
     
     Logger.info("Application started successfully")
     sys.exit(app.exec())
